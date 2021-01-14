@@ -50,15 +50,17 @@ lms = ['roberta', 'roberta', 'roberta', 'roberta', 'roberta', 'roberta',
 # roberta""".split('\n')
 
 for dataset, op, lm in zip(datasets, ops, lms):
-    if dataset in special_datasets:
-        batch_size, epochs = special_datasets[dataset]
-    else:
-        batch_size, epochs = 32, 15
+    # if dataset in special_datasets:
+    #         batch_size, epochs = special_datasets[dataset]
+    #     else:
+    #         batch_size, epochs = 32, 15
+    batch_size, epochs = 32, 1
 
-    for da in [True, False]:
-        for dk in [True, False]:
-            for run_id in range(5):
-                cmd = """CUDA_VISIBLE_DEVICES=3 python train_ditto.py \
+    for da in [True]:
+        for dk in [True]:
+            for run_id in range(1):
+                cmd = """set CUDA_VISIBLE_DEVICES=0\n
+              python train_ditto.py \
               --task %s \
               --logdir results_ditto/ \
               --finetuning \
