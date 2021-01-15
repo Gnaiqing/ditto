@@ -24,6 +24,7 @@ from ditto.dataset import DittoDataset
 from ditto.summarize import Summarizer
 from ditto.knowledge import *
 
+
 def to_str(row, summarizer=None, max_len=256, dk_injector=None):
     """Serialize a data entry
 y
@@ -50,6 +51,7 @@ y
         content = dk_injector.transform(content)
 
     return content
+
 
 def classify(sentence_pairs, config, model, lm='distilbert', max_len=256):
     """Apply the MRPC model.
@@ -92,6 +94,7 @@ def classify(sentence_pairs, config, model, lm='distilbert', max_len=256):
         results.append(pred)
 
     return results, Y_logits
+
 
 def predict(input_path, output_path, config, model,
             batch_size=1024,
@@ -159,7 +162,8 @@ def predict(input_path, output_path, config, model,
     run_tag = '%s_lm=%s_dk=%s_su=%s' % (config['name'], lm, str(dk_injector != None), str(summarizer != None))
     os.system('echo %s %f >> log.txt' % (run_tag, run_time))
 
-def load_model(task, path, lm, use_gpu, fp16=True):
+
+def load_model(task, checkpoint, lm, use_gpu, fp16=True):
     """Load a model for a specific task.
 
     Args:
@@ -174,7 +178,8 @@ def load_model(task, path, lm, use_gpu, fp16=True):
         MultiTaskNet: the model
     """
     # load models
-    checkpoint = os.path.join(path, '%s.pt' % task)
+
+    # checkpoint = os.path.join(path, '%s.pt' % task)
     if not os.path.exists(checkpoint):
         raise ModelNotFoundError(checkpoint)
 
@@ -205,19 +210,28 @@ def load_model(task, path, lm, use_gpu, fp16=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default='Structured/Beer')
-    parser.add_argument("--input_path", type=str, default='input/candidates_small.jsonl')
-    parser.add_argument("--output_path", type=str, default='output/matched_small.jsonl')
+    parser.add_argument("--input_path", type=str, default=None)
+    parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument("--lm", type=str, default='distilbert')
     parser.add_argument("--use_gpu", dest="use_gpu", action="store_true")
     parser.add_argument("--fp16", dest="fp16", action="store_true")
-    parser.add_argument("--checkpoint_path", type=str, default='checkpoints/')
+    parser.add_argument("--checkpoint_path", type=str, default='model/')
     parser.add_argument("--dk", type=str, default=None)
     parser.add_argument("--summarize", dest="summarize", action="store_true")
     parser.add_argument("--max_len", type=int, default=256)
+    parser.add_argument("--da", type=str, default=None)
+    parser.add_argument("--size", type=int, default=None)
+    parser.add_argument("--run_id",type=int, default=0)
     hp = parser.parse_args()
 
+
     # load the models
-    config, model = load_model(hp.task, hp.checkpoint_path,
+    run_tag = '%s_lm=%s_da=%s_dk=%s_su=%s_size=%s_id=%d' % (hp.task, hp.lm, hp.da,
+                                                            hp.dk, hp.summarize, str(hp.size), hp.run_id)
+    run_tag = run_tag.replace('/', '_')
+    checkpoint = os.path.join(hp.checkpoint_path, '%s_dev.pt' % run_tag)
+
+    config, model = load_model(hp.task, checkpoint,
                                hp.lm, hp.use_gpu, hp.fp16)
 
     summarizer = dk_injector = None
@@ -229,6 +243,21 @@ if __name__ == "__main__":
             dk_injector = ProductDKInjector(config, hp.dk)
         else:
             dk_injector = GeneralDKInjector(config, hp.dk)
+
+    # update input & output paths
+    if hp.input_path is None:
+        hp.input_path = config["testset"]
+
+    if hp.output_path is None:
+        l = ["output"] + config["testset"].split("/")[1:-1]
+        hp.output_path = "/".join(l)
+        if not os.path.exists(hp.output_path):
+            os.makedirs(hp.output_path)
+
+        hp.output_path = hp.output_path+"/test_output.jsonl"
+
+    print("Input path: ",hp.input_path)
+    print("Output path: ", hp.output_path)
 
     # run prediction
     predict(hp.input_path, hp.output_path, config, model,
