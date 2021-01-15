@@ -26,7 +26,7 @@ from ditto.knowledge import *
 
 def to_str(row, summarizer=None, max_len=256, dk_injector=None):
     """Serialize a data entry
-
+y
     Args:
         row (Dictionary): the data entry
         summarizer (Summarizer, optional): the summarization module

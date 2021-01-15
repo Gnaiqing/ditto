@@ -56,17 +56,21 @@ for dataset, op, lm in zip(datasets, ops, lms):
     #         batch_size, epochs = 32, 15
     batch_size, epochs = 32, 1
 
+    cmd = "set CUDA_VISIBLE_DEVICES=0"
+    print(cmd)
+    os.system(cmd)
+
     for da in [True]:
         for dk in [True]:
             for run_id in range(1):
-                cmd = """set CUDA_VISIBLE_DEVICES=0\n
-              python train_ditto.py \
+                cmd = """python train_ditto.py \
               --task %s \
               --logdir results_ditto/ \
               --finetuning \
               --batch_size %d \
               --lr 3e-5 \
               --fp16 \
+              --save_model \
               --lm %s \
               --n_epochs %d \
               --run_id %d""" % (dataset, batch_size, lm, epochs, run_id)
@@ -77,4 +81,8 @@ for dataset, op, lm in zip(datasets, ops, lms):
                 if dk:
                     cmd += ' --dk general'
                 print(cmd)
-                os.system(cmd)
+                c = input("Process?(y/n)")
+                if c.lower() == "y":
+                    os.system(cmd)
+                else:
+                    print("skip the dataset")

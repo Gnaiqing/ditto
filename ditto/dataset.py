@@ -73,7 +73,7 @@ class DittoDataset(SnippextDataset):
             list of str: the labels
         """
         sents, labels = [], []
-        for line in open(path):
+        for line in open(path,encoding='UTF-8'):
             items = line.strip().split('\t')
 
             # assert length
