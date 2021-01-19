@@ -163,6 +163,83 @@ def predict(input_path, output_path, config, model,
     os.system('echo %s %f >> log.txt' % (run_tag, run_time))
 
 
+def predict_ensemble(input_path, output_path, config, models,
+                     batch_size=1024,
+                     summarizer=None,
+                     lm='distilbert',
+                     max_len=256,
+                     dk_injector=None):
+    """Run the model over the input file containing the candidate entry pairs
+
+    Args:
+        input_path (str): the input file path
+        output_path (str): the output file path
+        config (Dictionary): the task configuration
+        models (SnippextModel): the ensemble models for prediction
+        batch_size (int): the batch size
+        summarizer (Summarizer, optional): the summarization module
+        max_len (int, optional): the max sequence length
+        dk_injector (DKInjector, optional): the domain-knowledge injector
+
+    Returns:
+        None
+    """
+    pairs = []
+
+    def process_batch(rows, pairs, writer):
+        scores_list = []
+        for model in models:
+            try:
+                predictions, logits = classify(pairs, config, model, lm=lm, max_len=max_len)
+                scores = softmax(logits, axis=1)
+                scores_list.append(scores)
+            except:
+                # ignore the whole batch
+                print("ignoring the whole batch")
+                return
+
+        scores_list_np = np.array(scores_list)
+        ensemble_scores_np = np.mean(scores_list_np,axis=0)
+        ensemble_scores = ensemble_scores_np.tolist()
+        ensemble_predictions = ensemble_scores_np.argmax(axis=1).astype(str).tolist()
+
+        for row, pred, score in zip(rows, ensemble_predictions, ensemble_scores):
+            output = {'left': row[0], 'right': row[1],
+                      'match': pred,
+                      'match_confidence': score[int(pred)]}
+            writer.write(output)
+
+
+    # input_path can also be train/valid/test.txt
+    # convert to jsonlines
+    if '.txt' in input_path:
+        with jsonlines.open(input_path + '.jsonl', mode='w') as writer:
+            for line in open(input_path):
+                writer.write(line.split('\t')[:2])
+        input_path += '.jsonl'
+
+    start_time = time.time()
+    with jsonlines.open(input_path) as reader, \
+            jsonlines.open(output_path, mode='w') as writer:
+        pairs = []
+        rows = []
+        for idx, row in tqdm(enumerate(reader)):
+            pairs.append((to_str(row[0], summarizer, max_len, dk_injector),
+                          to_str(row[1], summarizer, max_len, dk_injector)))
+            rows.append(row)
+            if len(pairs) == batch_size:
+                process_batch(rows, pairs, writer)
+                pairs.clear()
+                rows.clear()
+
+        if len(pairs) > 0:
+            process_batch(rows, pairs, writer)
+
+    run_time = time.time() - start_time
+    run_tag = '%s_lm=%s_dk=%s_su=%s_ensem' % (config['name'], lm, str(dk_injector != None), str(summarizer != None))
+    os.system('echo %s %f >> log.txt' % (run_tag, run_time))
+
+
 def load_model(task, checkpoint, lm, use_gpu, fp16=True):
     """Load a model for a specific task.
 
@@ -221,18 +298,26 @@ if __name__ == "__main__":
     parser.add_argument("--max_len", type=int, default=256)
     parser.add_argument("--da", type=str, default=None)
     parser.add_argument("--size", type=int, default=None)
-    parser.add_argument("--run_id",type=int, default=0)
+    parser.add_argument("--run_id", type=int, default=0)
+    parser.add_argument("--calibration", type=str,default=None)
+    parser.add_argument("--ensemble", type=int,default=1)
     hp = parser.parse_args()
 
 
     # load the models
-    run_tag = '%s_lm=%s_da=%s_dk=%s_su=%s_size=%s_id=%d' % (hp.task, hp.lm, hp.da,
-                                                            hp.dk, hp.summarize, str(hp.size), hp.run_id)
-    run_tag = run_tag.replace('/', '_')
-    checkpoint = os.path.join(hp.checkpoint_path, '%s_dev.pt' % run_tag)
+    models = []
+    config = None
+    for i in range(hp.ensemble):
+        # the id of models used are run_id, run_id+1, ..., run_id+ensemble-1
+        run_tag = '%s_lm=%s_da=%s_dk=%s_su=%s_size=%s_id=%d' % (hp.task, hp.lm, hp.da,
+                                                                hp.dk, hp.summarize, str(hp.size), hp.run_id+i)
+        run_tag = run_tag.replace('/', '_')
+        checkpoint = os.path.join(hp.checkpoint_path, '%s_dev.pt' % run_tag)
 
-    config, model = load_model(hp.task, checkpoint,
-                               hp.lm, hp.use_gpu, hp.fp16)
+        config, model = load_model(hp.task, checkpoint,
+                                   hp.lm, hp.use_gpu, hp.fp16)
+        models.append(model)
+
 
     summarizer = dk_injector = None
     if hp.summarize:
@@ -254,14 +339,23 @@ if __name__ == "__main__":
         if not os.path.exists(hp.output_path):
             os.makedirs(hp.output_path)
 
-        hp.output_path = hp.output_path+"/test_output.jsonl"
+        output_tag = "output_cal=%s_en=%d.jsonl" % (hp.cal, hp.ensemble)
+        hp.output_path = hp.output_path+"/" + output_tag
 
     print("Input path: ",hp.input_path)
     print("Output path: ", hp.output_path)
 
     # run prediction
-    predict(hp.input_path, hp.output_path, config, model,
-            summarizer=summarizer,
-            max_len=hp.max_len,
-            lm=hp.lm,
-            dk_injector=dk_injector)
+    if hp.ensemble == 1:
+        predict(hp.input_path, hp.output_path, config, models[0],
+                summarizer=summarizer,
+                max_len=hp.max_len,
+                lm=hp.lm,
+                dk_injector=dk_injector)
+    else:
+        predict_ensemble(hp.input_path, hp.output_path, config, models,
+                         summarizer=summarizer,
+                         max_len=hp.max_lan,
+                         lm=hp.lm,
+                         dk_injector=dk_injector)
+
