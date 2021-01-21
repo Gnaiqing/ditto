@@ -27,7 +27,7 @@ from ditto.knowledge import *
 
 def to_str(row, summarizer=None, max_len=256, dk_injector=None):
     """Serialize a data entry
-y
+
     Args:
         row (Dictionary): the data entry
         summarizer (Summarizer, optional): the summarization module
@@ -37,12 +37,13 @@ y
     Returns:
         string: the serialized version
     """
+    content = ''
     # if the entry is already serialized
     if isinstance(row, str):
-        return row
-    content = ''
-    for attr in row.keys():
-        content += 'COL %s VAL %s ' % (attr, row[attr])
+        content = row
+    else:
+        for attr in row.keys():
+            content += 'COL %s VAL %s ' % (attr, row[attr])
 
     if summarizer is not None:
         content = summarizer.transform(content, max_len=max_len)
@@ -163,52 +164,38 @@ def predict(input_path, output_path, config, model,
     os.system('echo %s %f >> log.txt' % (run_tag, run_time))
 
 
-def predict_ensemble(input_path, output_path, config, models,
-                     batch_size=1024,
-                     summarizer=None,
-                     lm='distilbert',
-                     max_len=256,
-                     dk_injector=None):
+def predict_noprint(input_path, config, model,
+            batch_size=1024,
+            summarizer=None,
+            lm='distilbert',
+            max_len=256,
+            dk_injector=None):
     """Run the model over the input file containing the candidate entry pairs
 
     Args:
         input_path (str): the input file path
-        output_path (str): the output file path
         config (Dictionary): the task configuration
-        models (SnippextModel): the ensemble models for prediction
+        model (SnippextModel): the model for prediction
         batch_size (int): the batch size
         summarizer (Summarizer, optional): the summarization module
         max_len (int, optional): the max sequence length
         dk_injector (DKInjector, optional): the domain-knowledge injector
 
     Returns:
-        None
+        output_rows: list containing pair description
+        output_predictions: list containing prediction results
+        output_logits: list containing logits
     """
     pairs = []
 
     def process_batch(rows, pairs, writer):
-        scores_list = []
-        for model in models:
-            try:
-                predictions, logits = classify(pairs, config, model, lm=lm, max_len=max_len)
-                scores = softmax(logits, axis=1)
-                scores_list.append(scores)
-            except:
-                # ignore the whole batch
-                print("ignoring the whole batch")
-                return
+        try:
+            predictions, logits = classify(pairs, config, model, lm=lm, max_len=max_len)
+        except:
+            # ignore the whole batch
+            return [],[],[]
 
-        scores_list_np = np.array(scores_list)
-        ensemble_scores_np = np.mean(scores_list_np,axis=0)
-        ensemble_scores = ensemble_scores_np.tolist()
-        ensemble_predictions = ensemble_scores_np.argmax(axis=1).astype(str).tolist()
-
-        for row, pred, score in zip(rows, ensemble_predictions, ensemble_scores):
-            output = {'left': row[0], 'right': row[1],
-                      'match': pred,
-                      'match_confidence': score[int(pred)]}
-            writer.write(output)
-
+        return rows, predictions, logits
 
     # input_path can also be train/valid/test.txt
     # convert to jsonlines
@@ -218,26 +205,33 @@ def predict_ensemble(input_path, output_path, config, models,
                 writer.write(line.split('\t')[:2])
         input_path += '.jsonl'
 
-    start_time = time.time()
-    with jsonlines.open(input_path) as reader, \
-            jsonlines.open(output_path, mode='w') as writer:
+    # batch processing
+    with jsonlines.open(input_path) as reader:
         pairs = []
         rows = []
+        output_rows = []
+        output_predictions = []
+        output_logits = []
+
         for idx, row in tqdm(enumerate(reader)):
             pairs.append((to_str(row[0], summarizer, max_len, dk_injector),
                           to_str(row[1], summarizer, max_len, dk_injector)))
             rows.append(row)
             if len(pairs) == batch_size:
-                process_batch(rows, pairs, writer)
+                t_rows, t_predictions, t_logits = process_batch(rows, pairs, writer)
+                output_rows += t_rows
+                output_predictions += t_predictions
+                output_logits += t_logits
                 pairs.clear()
                 rows.clear()
 
         if len(pairs) > 0:
-            process_batch(rows, pairs, writer)
+            t_rows, t_predictions, t_logits = process_batch(rows, pairs, writer)
+            output_rows += t_rows
+            output_predictions += t_predictions
+            output_logits += t_logits
 
-    run_time = time.time() - start_time
-    run_tag = '%s_lm=%s_dk=%s_su=%s_ensem' % (config['name'], lm, str(dk_injector != None), str(summarizer != None))
-    os.system('echo %s %f >> log.txt' % (run_tag, run_time))
+        return output_rows, output_predictions, output_logits
 
 
 def load_model(task, checkpoint, lm, use_gpu, fp16=True):
@@ -300,13 +294,16 @@ if __name__ == "__main__":
     parser.add_argument("--size", type=int, default=None)
     parser.add_argument("--run_id", type=int, default=0)
     parser.add_argument("--calibration", type=str,default=None)
-    parser.add_argument("--ensemble", type=int,default=1)
+    parser.add_argument("--ensemble", type=int,default=5)
     hp = parser.parse_args()
 
 
     # load the models
     models = []
     config = None
+    if hp.calibration != "ensemble":
+        hp.ensemble = 1
+
     for i in range(hp.ensemble):
         # the id of models used are run_id, run_id+1, ..., run_id+ensemble-1
         run_tag = '%s_lm=%s_da=%s_dk=%s_su=%s_size=%s_id=%d' % (hp.task, hp.lm, hp.da,
@@ -318,7 +315,6 @@ if __name__ == "__main__":
                                    hp.lm, hp.use_gpu, hp.fp16)
         models.append(model)
 
-
     summarizer = dk_injector = None
     if hp.summarize:
         summarizer = Summarizer(config, hp.lm)
@@ -328,6 +324,22 @@ if __name__ == "__main__":
             dk_injector = ProductDKInjector(config, hp.dk)
         else:
             dk_injector = GeneralDKInjector(config, hp.dk)
+
+    # load validation set for calibration
+    if hp.calibration == "conformal":
+        vocab = config['vocab']
+        validset = config['validset']
+        if hp.summarize:
+            validset = summarizer.transform_file(validset, max_len=hp.max_len)
+        if hp.dk is not None:
+            validset = dk_injector.transform_file(validset)
+        valid_dataset = DittoDataset(validset,vocab,hp.task,lm=hp.lm)
+        valid_iterator = data.DataLoader(dataset=valid_dataset,
+                                         batch_size=64,
+                                         shuffle=False,
+                                         num_workers=0,
+                                         collate_fn=DittoDataset.pad)
+
 
     # update input & output paths
     if hp.input_path is None:
@@ -339,23 +351,43 @@ if __name__ == "__main__":
         if not os.path.exists(hp.output_path):
             os.makedirs(hp.output_path)
 
-        output_tag = "output_cal=%s_en=%d.jsonl" % (hp.cal, hp.ensemble)
+        output_tag = "output_cal=%s_en=%d.jsonl" % (hp.calibration, hp.ensemble)
         hp.output_path = hp.output_path+"/" + output_tag
 
     print("Input path: ",hp.input_path)
     print("Output path: ", hp.output_path)
 
     # run prediction
-    if hp.ensemble == 1:
-        predict(hp.input_path, hp.output_path, config, models[0],
-                summarizer=summarizer,
-                max_len=hp.max_len,
-                lm=hp.lm,
-                dk_injector=dk_injector)
-    else:
-        predict_ensemble(hp.input_path, hp.output_path, config, models,
-                         summarizer=summarizer,
-                         max_len=hp.max_lan,
-                         lm=hp.lm,
-                         dk_injector=dk_injector)
+    if hp.calibration == "ensemble":
+        for i in range(hp.ensemble):
+            output_rows, output_predictions, output_logits = predict_noprint(
+                                        hp.input_path,config, models[i],
+                                        summarizer=summarizer, lm=hp.lm,
+                                        max_len=hp.max_len, dk_injector=dk_injector)
+            if i == 0:
+                output_scores = np.array(softmax(output_logits, axis=1))
+            else:
+                output_scores += np.array(softmax(output_logits, axis=1))
+        output_scores = (output_scores / hp.ensemble).astype(str).tolist()
+        output_pred = output_scores.argmax(axis=1).tolist()
+
+    # print output
+    with jsonlines.open(hp.output_path, mode='w') as writer:
+        for row, pred, score in zip(output_rows, output_pred, output_scores):
+            output = {'left': row[0],
+                      'right': row[1],
+                      'match': pred,
+                      'match_confidence': score[int(pred)]}
+            writer.write(output)
+
+
+
+
+
+
+
+
+
+
+
 

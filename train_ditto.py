@@ -2,6 +2,7 @@ import os
 import argparse
 import json
 import sys
+import time
 
 sys.path.insert(0, "Snippext_public")
 
@@ -32,6 +33,7 @@ if __name__=="__main__":
 
     hp = parser.parse_args()
 
+    start_time = time.time()
     # only a single task for baseline
     task = hp.task
 
@@ -101,3 +103,6 @@ if __name__=="__main__":
                              test_dataset,
                              hp,
                              run_tag)
+
+    run_time = time.time() - start_time
+    os.system('echo %s %f >> log_train.txt' % (run_tag, run_time))
