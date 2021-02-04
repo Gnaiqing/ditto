@@ -24,6 +24,8 @@ from ditto.dataset import DittoDataset
 from ditto.summarize import Summarizer
 from ditto.knowledge import *
 
+from torch.nn import CrossEntropyLoss
+
 
 def to_str(row, summarizer=None, max_len=256, dk_injector=None):
     """Serialize a data entry
@@ -46,6 +48,7 @@ def to_str(row, summarizer=None, max_len=256, dk_injector=None):
             content += 'COL %s VAL %s ' % (attr, row[attr])
 
     if summarizer is not None:
+        #TODO: fix the bug (summarizer can only deal with a whole pair, and hence cannot be used here)
         content = summarizer.transform(content, max_len=max_len)
 
     if dk_injector is not None:
@@ -197,12 +200,20 @@ def predict_noprint(input_path, config, model,
 
         return rows, predictions, logits
 
+    output_labels = []
     # input_path can also be train/valid/test.txt
     # convert to jsonlines
     if '.txt' in input_path:
         with jsonlines.open(input_path + '.jsonl', mode='w') as writer:
             for line in open(input_path):
-                writer.write(line.split('\t')[:2])
+                records = line.split('\t')
+                writer.write(records[:2])
+                if len(records) > 2:
+                    # collect labels
+                    output_labels.append(records[2].strip())
+                else:
+                    # missing labels
+                    output_labels.append("M")
         input_path += '.jsonl'
 
     # batch processing
@@ -231,7 +242,7 @@ def predict_noprint(input_path, config, model,
             output_predictions += t_predictions
             output_logits += t_logits
 
-        return output_rows, output_predictions, output_logits
+        return output_rows, output_predictions, output_logits, output_labels
 
 
 def load_model(task, checkpoint, lm, use_gpu, fp16=True):
@@ -278,6 +289,16 @@ def load_model(task, checkpoint, lm, use_gpu, fp16=True):
     return config, model
 
 
+def compute_e_value(score, u, y):
+    # compute E score for conformal calibration
+    p = score[y]    # probability of the true label
+    q = 1-p  # probability of the false label
+    if p >= q:
+        return p*u
+    else:
+        return q + p*u
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default='Structured/Beer')
@@ -297,7 +318,7 @@ if __name__ == "__main__":
     parser.add_argument("--ensemble", type=int,default=5)
     hp = parser.parse_args()
 
-
+    start_time = time.time()
     # load the models
     models = []
     config = None
@@ -310,6 +331,9 @@ if __name__ == "__main__":
                                                                 hp.dk, hp.summarize, str(hp.size), hp.run_id+i)
         run_tag = run_tag.replace('/', '_')
         checkpoint = os.path.join(hp.checkpoint_path, '%s_dev.pt' % run_tag)
+        if not os.path.exists(checkpoint):
+            print("File %s not found. Abort." % checkpoint)
+            exit()
 
         config, model = load_model(hp.task, checkpoint,
                                    hp.lm, hp.use_gpu, hp.fp16)
@@ -326,7 +350,7 @@ if __name__ == "__main__":
             dk_injector = GeneralDKInjector(config, hp.dk)
 
     # load validation set for calibration
-    if hp.calibration == "conformal":
+    if hp.calibration == "conformal" or hp.calibration == "temperature":
         vocab = config['vocab']
         validset = config['validset']
         if hp.summarize:
@@ -339,7 +363,43 @@ if __name__ == "__main__":
                                          shuffle=False,
                                          num_workers=0,
                                          collate_fn=DittoDataset.pad)
+        # get prediction result for validation set
+        Y_logits = []
+        Y = []
 
+        with torch.no_grad():
+            for i, batch in enumerate(valid_iterator):
+                words, x, is_heads, tags, mask, y, seqlens, taskname = batch
+                taskname = taskname[0]
+                logits, y1, y_hat = model(x, y, task=taskname)  # y_hat: (N, T)
+                Y_logits += logits.cpu().numpy().tolist()
+                Y += y1.cpu().numpy().tolist()
+
+        if hp.calibration == "temperature":
+            temp_list = np.logspace(-1,1,100)
+            min_nll = 1e3
+            best_temp = 1
+            loss = CrossEntropyLoss()
+            Y = torch.Tensor(Y).type(torch.long)
+            Y_logits = torch.Tensor(Y_logits)
+
+            for temp in temp_list:
+                Y_logits_temp = Y_logits * temp
+                # TODO: fix the bug in loss function input format
+                nll = float(loss(Y_logits_temp, Y))
+                if nll < min_nll:
+                    min_nll = nll
+                    best_temp = temp
+
+        elif hp.calibration == "conformal":
+            scores = softmax(Y_logits, axis=1)
+            # compute E values for conformal calibration
+            E = []
+            for i in range(len(Y)):
+                u = random.uniform(0,1)
+                e = compute_e_value(scores[i],u,Y[i])
+                E.append(e)
+            E = np.array(E)
 
     # update input & output paths
     if hp.input_path is None:
@@ -351,7 +411,7 @@ if __name__ == "__main__":
         if not os.path.exists(hp.output_path):
             os.makedirs(hp.output_path)
 
-        output_tag = "output_cal=%s_en=%d.jsonl" % (hp.calibration, hp.ensemble)
+        output_tag = "output_cal=%s_en=%d_id=%d.jsonl" % (hp.calibration, hp.ensemble,hp.run_id)
         hp.output_path = hp.output_path+"/" + output_tag
 
     print("Input path: ",hp.input_path)
@@ -360,7 +420,7 @@ if __name__ == "__main__":
     # run prediction
     if hp.calibration == "ensemble":
         for i in range(hp.ensemble):
-            output_rows, output_predictions, output_logits = predict_noprint(
+            output_rows, _, output_logits, output_labels = predict_noprint(
                                         hp.input_path,config, models[i],
                                         summarizer=summarizer, lm=hp.lm,
                                         max_len=hp.max_len, dk_injector=dk_injector)
@@ -368,17 +428,64 @@ if __name__ == "__main__":
                 output_scores = np.array(softmax(output_logits, axis=1))
             else:
                 output_scores += np.array(softmax(output_logits, axis=1))
-        output_scores = (output_scores / hp.ensemble).astype(str).tolist()
-        output_pred = output_scores.argmax(axis=1).tolist()
+        # average the prediction of ensemble models to get final result
+        output_scores = output_scores / hp.ensemble
+        idx2tag = {idx: tag for idx, tag in enumerate(config['vocab'])}
+        output_pred = []
+        for score in output_scores:
+            pred = score.argmax()
+            output_pred.append(idx2tag[pred])
+
+        output_conf = output_scores.max(axis=1).tolist()
+
+    elif hp.calibration == "conformal":
+        output_rows, output_pred, output_logits, output_labels = predict_noprint(
+            hp.input_path,config, models[0],
+            summarizer=summarizer, lm=hp.lm,
+            max_len=hp.max_len, dk_injector=dk_injector)
+        output_scores = np.array(softmax(output_logits, axis=1))
+        output_conf = output_scores.max(axis=1).tolist()
+        # calibration on confidence
+        for i in range(len(output_conf)):
+            # calculate the quantile of output_conf[i]
+            conf = output_conf[i]
+            calibrated_conf = sum(E < conf) / len(E)
+            # use the quantile to replace the original confidence
+            if calibrated_conf < 0.5:
+                output_conf[i] = 0.5
+            else:
+                output_conf[i] = calibrated_conf
+
+    elif hp.calibration == "temperature":
+        output_rows, output_pred, output_logits, output_labels = predict_noprint(
+            hp.input_path,config, models[0],
+            summarizer=summarizer, lm=hp.lm,
+            max_len=hp.max_len, dk_injector=dk_injector)
+        output_logits = (np.array(output_logits)*best_temp).tolist()
+        output_scores = softmax(output_logits,axis=1)
+        output_conf = output_scores.max(axis=1).tolist()
+
+    else: # no calibration
+        output_rows, output_pred, output_logits, output_labels = predict_noprint(
+            hp.input_path,config, models[0],
+            summarizer=summarizer, lm=hp.lm,
+            max_len=hp.max_len, dk_injector=dk_injector)
+        output_scores = np.array(softmax(output_logits, axis=1))
+        output_conf = output_scores.max(axis=1).tolist()
 
     # print output
     with jsonlines.open(hp.output_path, mode='w') as writer:
-        for row, pred, score in zip(output_rows, output_pred, output_scores):
+        for row, pred, conf, label in zip(output_rows, output_pred, output_conf, output_labels):
             output = {'left': row[0],
                       'right': row[1],
                       'match': pred,
-                      'match_confidence': score[int(pred)]}
+                      'match_confidence': conf,
+                      'label': label}
             writer.write(output)
+        writer.close()
+
+    run_time = time.time() - start_time
+    os.system("echo %s %f >> log_match.txt" % (hp.output_path, run_time))
 
 
 

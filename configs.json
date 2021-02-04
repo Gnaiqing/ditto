@@ -259,9 +259,9 @@
   "name": "Textual/Company",
   "task_type": "classification",
   "vocab": ["0", "1"],
-  "trainset": "data/er_magellan/Textual/Company/train.txt.tfidf",
-  "validset": "data/er_magellan/Textual/Company/valid.txt.tfidf",
-  "testset": "data/er_magellan/Textual/Company/test.txt.tfidf"
+  "trainset": "data/er_magellan/Textual/Company/train.txt",
+  "validset": "data/er_magellan/Textual/Company/valid.txt",
+  "testset": "data/er_magellan/Textual/Company/test.txt"
   },
 {
   "name": "wdc_all_title_small",
