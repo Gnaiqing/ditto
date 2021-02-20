@@ -39,16 +39,16 @@ def to_str(row, summarizer=None, max_len=256, dk_injector=None):
     Returns:
         string: the serialized version
     """
-    content = ''
+
     # if the entry is already serialized
     if isinstance(row, str):
-        content = row
-    else:
-        for attr in row.keys():
-            content += 'COL %s VAL %s ' % (attr, row[attr])
+        return row
+
+    content = ''
+    for attr in row.keys():
+        content += 'COL %s VAL %s ' % (attr, row[attr])
 
     if summarizer is not None:
-        #TODO: fix the bug (summarizer can only deal with a whole pair, and hence cannot be used here)
         content = summarizer.transform(content, max_len=max_len)
 
     if dk_injector is not None:
@@ -167,82 +167,25 @@ def predict(input_path, output_path, config, model,
     os.system('echo %s %f >> log.txt' % (run_tag, run_time))
 
 
-def predict_noprint(input_path, config, model,
-            batch_size=1024,
-            summarizer=None,
-            lm='distilbert',
-            max_len=256,
-            dk_injector=None):
-    """Run the model over the input file containing the candidate entry pairs
+def classify_from_iterator(model, iterator, use_gpu):
+    if use_gpu:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    else:
+        device = 'cpu'
 
-    Args:
-        input_path (str): the input file path
-        config (Dictionary): the task configuration
-        model (SnippextModel): the model for prediction
-        batch_size (int): the batch size
-        summarizer (Summarizer, optional): the summarization module
-        max_len (int, optional): the max sequence length
-        dk_injector (DKInjector, optional): the domain-knowledge injector
+    Y_logits = []
+    Y_hat = []
+    with torch.no_grad():
+        for i, batch in enumerate(iterator):
+            words, x, is_heads, tags, mask, y, seqlens, taskname = batch
+            taskname = taskname[0]
+            x = x.to(device)
+            y = y.to(device)
+            logits, _, y_hat = model(x, y, task=taskname)  # y_hat: (N, T)
+            Y_logits += logits.cpu().numpy().tolist()
+            Y_hat += y_hat.cpu().numpy().tolist()
 
-    Returns:
-        output_rows: list containing pair description
-        output_predictions: list containing prediction results
-        output_logits: list containing logits
-    """
-    pairs = []
-
-    def process_batch(rows, pairs, writer):
-        try:
-            predictions, logits = classify(pairs, config, model, lm=lm, max_len=max_len)
-        except:
-            # ignore the whole batch
-            return [],[],[]
-
-        return rows, predictions, logits
-
-    output_labels = []
-    # input_path can also be train/valid/test.txt
-    # convert to jsonlines
-    if '.txt' in input_path:
-        with jsonlines.open(input_path + '.jsonl', mode='w') as writer:
-            for line in open(input_path):
-                records = line.split('\t')
-                writer.write(records[:2])
-                if len(records) > 2:
-                    # collect labels
-                    output_labels.append(records[2].strip())
-                else:
-                    # missing labels
-                    output_labels.append("M")
-        input_path += '.jsonl'
-
-    # batch processing
-    with jsonlines.open(input_path) as reader:
-        pairs = []
-        rows = []
-        output_rows = []
-        output_predictions = []
-        output_logits = []
-
-        for idx, row in tqdm(enumerate(reader)):
-            pairs.append((to_str(row[0], summarizer, max_len, dk_injector),
-                          to_str(row[1], summarizer, max_len, dk_injector)))
-            rows.append(row)
-            if len(pairs) == batch_size:
-                t_rows, t_predictions, t_logits = process_batch(rows, pairs, writer)
-                output_rows += t_rows
-                output_predictions += t_predictions
-                output_logits += t_logits
-                pairs.clear()
-                rows.clear()
-
-        if len(pairs) > 0:
-            t_rows, t_predictions, t_logits = process_batch(rows, pairs, writer)
-            output_rows += t_rows
-            output_predictions += t_predictions
-            output_logits += t_logits
-
-        return output_rows, output_predictions, output_logits, output_labels
+    return Y_hat, Y_logits
 
 
 def load_model(task, checkpoint, lm, use_gpu, fp16=True):
@@ -314,8 +257,12 @@ if __name__ == "__main__":
     parser.add_argument("--da", type=str, default=None)
     parser.add_argument("--size", type=int, default=None)
     parser.add_argument("--run_id", type=int, default=0)
+    # calibration: select which predictive uncertainty estimation method is used
     parser.add_argument("--calibration", type=str,default=None)
+    # ensemble: select how many models are used in ensemble. Valid only if calibration=="ensemble"
     parser.add_argument("--ensemble", type=int,default=5)
+    # validset: path to validation set. When set to None, default valid set is used
+    parser.add_argument("--validset", type=str,default=None)
     hp = parser.parse_args()
 
     start_time = time.time()
@@ -352,7 +299,11 @@ if __name__ == "__main__":
     # load validation set for calibration
     if hp.calibration == "conformal" or hp.calibration == "temperature":
         vocab = config['vocab']
-        validset = config['validset']
+        if hp.validset is None:
+            validset = config['validset']
+        else:
+            validset = hp.validset
+
         if hp.summarize:
             validset = summarizer.transform_file(validset, max_len=hp.max_len)
         if hp.dk is not None:
@@ -364,16 +315,7 @@ if __name__ == "__main__":
                                          num_workers=0,
                                          collate_fn=DittoDataset.pad)
         # get prediction result for validation set
-        Y_logits = []
-        Y = []
-
-        with torch.no_grad():
-            for i, batch in enumerate(valid_iterator):
-                words, x, is_heads, tags, mask, y, seqlens, taskname = batch
-                taskname = taskname[0]
-                logits, y1, y_hat = model(x, y, task=taskname)  # y_hat: (N, T)
-                Y_logits += logits.cpu().numpy().tolist()
-                Y += y1.cpu().numpy().tolist()
+        Y,Y_logits = classify_from_iterator(models[0],valid_iterator,hp.use_gpu)
 
         if hp.calibration == "temperature":
             temp_list = np.logspace(-1,1,100)
@@ -385,7 +327,6 @@ if __name__ == "__main__":
 
             for temp in temp_list:
                 Y_logits_temp = Y_logits * temp
-                # TODO: fix the bug in loss function input format
                 nll = float(loss(Y_logits_temp, Y))
                 if nll < min_nll:
                     min_nll = nll
@@ -417,17 +358,41 @@ if __name__ == "__main__":
     print("Input path: ",hp.input_path)
     print("Output path: ", hp.output_path)
 
+    # load data from input path
+    testset = hp.input_path
+    original_test_dataset = DittoDataset(testset,config["vocab"],hp.task,lm=hp.lm)
+    output_rows = []
+    output_labels = []
+
+    test_size = len(original_test_dataset)
+    for i in range(test_size):
+        words, x, is_heads, tags, mask, y, seqlens, taskname = original_test_dataset[i]
+        row = words.split(' [SEP] ')
+        output_rows.append(row)
+        output_labels.append(y)
+
+
+    if hp.summarize:
+        testset = summarizer.transform_file(testset, max_len=hp.max_len)
+    if hp.dk is not None:
+        testset = dk_injector.transform_file(testset)
+    test_dataset = DittoDataset(testset,config["vocab"],hp.task,lm=hp.lm)
+    test_iterator = data.DataLoader(dataset=test_dataset,
+                                     batch_size=64,
+                                     shuffle=False,
+                                     num_workers=0,
+                                     collate_fn=DittoDataset.pad)
+
+
     # run prediction
     if hp.calibration == "ensemble":
         for i in range(hp.ensemble):
-            output_rows, _, output_logits, output_labels = predict_noprint(
-                                        hp.input_path,config, models[i],
-                                        summarizer=summarizer, lm=hp.lm,
-                                        max_len=hp.max_len, dk_injector=dk_injector)
+            output_pred, output_logits = classify_from_iterator(models[i],test_iterator,hp.use_gpu)
             if i == 0:
                 output_scores = np.array(softmax(output_logits, axis=1))
             else:
                 output_scores += np.array(softmax(output_logits, axis=1))
+
         # average the prediction of ensemble models to get final result
         output_scores = output_scores / hp.ensemble
         idx2tag = {idx: tag for idx, tag in enumerate(config['vocab'])}
@@ -439,10 +404,7 @@ if __name__ == "__main__":
         output_conf = output_scores.max(axis=1).tolist()
 
     elif hp.calibration == "conformal":
-        output_rows, output_pred, output_logits, output_labels = predict_noprint(
-            hp.input_path,config, models[0],
-            summarizer=summarizer, lm=hp.lm,
-            max_len=hp.max_len, dk_injector=dk_injector)
+        output_pred, output_logits = classify_from_iterator(models[i],test_iterator,hp.use_gpu)
         output_scores = np.array(softmax(output_logits, axis=1))
         output_conf = output_scores.max(axis=1).tolist()
         # calibration on confidence
@@ -457,19 +419,13 @@ if __name__ == "__main__":
                 output_conf[i] = calibrated_conf
 
     elif hp.calibration == "temperature":
-        output_rows, output_pred, output_logits, output_labels = predict_noprint(
-            hp.input_path,config, models[0],
-            summarizer=summarizer, lm=hp.lm,
-            max_len=hp.max_len, dk_injector=dk_injector)
+        output_pred, output_logits = classify_from_iterator(models[0],test_iterator,hp.use_gpu)
         output_logits = (np.array(output_logits)*best_temp).tolist()
         output_scores = softmax(output_logits,axis=1)
         output_conf = output_scores.max(axis=1).tolist()
 
     else: # no calibration
-        output_rows, output_pred, output_logits, output_labels = predict_noprint(
-            hp.input_path,config, models[0],
-            summarizer=summarizer, lm=hp.lm,
-            max_len=hp.max_len, dk_injector=dk_injector)
+        output_pred, output_logits = classify_from_iterator(models[0],test_iterator,hp.use_gpu)
         output_scores = np.array(softmax(output_logits, axis=1))
         output_conf = output_scores.max(axis=1).tolist()
 
@@ -486,15 +442,3 @@ if __name__ == "__main__":
 
     run_time = time.time() - start_time
     os.system("echo %s %f >> log_match.txt" % (hp.output_path, run_time))
-
-
-
-
-
-
-
-
-
-
-
-
