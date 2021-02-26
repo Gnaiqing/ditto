@@ -4,7 +4,6 @@ import argparse
 import json
 import jsonlines
 from sklearn.metrics import f1_score
-import matplotlib.pyplot as plt
 import pandas as pd
 import re
 import os
