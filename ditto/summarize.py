@@ -130,6 +130,6 @@ class Summarizer:
         if not os.path.exists(out_fn) or \
            os.stat(out_fn).st_size == 0 or overwrite:
             with open(out_fn, 'w') as fout:
-                for line in open(input_fn):
+                for line in open(input_fn,encoding="UTF-8"):
                     fout.write(self.transform(line, max_len=max_len))
         return out_fn

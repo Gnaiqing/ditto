@@ -1,0 +1,4 @@
+# ignore all checkpoint files
+results_ditto/
+# ignore all modelss since they are big
+model/

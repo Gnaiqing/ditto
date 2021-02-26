@@ -20,7 +20,8 @@ special_datasets = {
     'Structured/iTunes-Amazon': (32, 40),
     'Structured/Fodors-Zagats': (32, 40),
     'Dirty/iTunes-Amazon': (32, 40),
-    'Textual/Company': (32, 15)
+    'Textual/Company': (32, 40),
+    'Textual/Abt-Buy': (16, 15)
 }
 
 ops = """swap
@@ -80,6 +81,17 @@ def train_all_er_magellan(hp):
                   --lm %s \
                   --n_epochs %d \
                   --run_id %d""" % (dataset, batch_size, lm, epochs, run_id+hp.start_id)
+                  #   cmd = """python train_ditto.py \
+                  # --task %s \
+                  # --logdir results_ditto/ \
+                  # --finetuning \
+                  # --batch_size %d \
+                  # --lr 3e-5 \
+                  # --fp16 \
+                  # --save_model \
+                  # --lm %s \
+                  # --n_epochs %d \
+                  # --run_id %d""" % (dataset, batch_size, lm, epochs, run_id+hp.start_id)
                     # if 'Company' in dataset:
                     #     cmd += ' --summarize'
                     if hp.su:
@@ -91,6 +103,7 @@ def train_all_er_magellan(hp):
                         cmd += ' --dk general'
                     print(cmd)
                     os.system(cmd)
+
 
 def match_all_er_magellan(hp):
     for dataset, op, lm in zip(datasets, ops, lms):

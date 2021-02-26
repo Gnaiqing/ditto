@@ -277,7 +277,7 @@ if __name__ == "__main__":
         run_tag = '%s_lm=%s_da=%s_dk=%s_su=%s_size=%s_id=%d' % (hp.task, hp.lm, hp.da,
                                                                 hp.dk, hp.summarize, str(hp.size), hp.run_id+i)
         run_tag = run_tag.replace('/', '_')
-        checkpoint = os.path.join(hp.checkpoint_path, '%s_dev.pt' % run_tag)
+        checkpoint = os.path.join(hp.checkpoint_path, '%s_test.pt' % run_tag)
         if not os.path.exists(checkpoint):
             print("File %s not found. Abort." % checkpoint)
             exit()
