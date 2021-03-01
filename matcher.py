@@ -188,6 +188,17 @@ def classify_from_iterator(model, iterator, use_gpu):
     return Y_hat, Y_logits
 
 
+def get_label(iterator):
+    # get the list of label from iterator
+    Y = []
+    with torch.no_grad():
+        for i, batch in enumerate(iterator):
+            words, x, is_heads, tags, mask, y, seqlens, taskname = batch
+            Y += y.numpy().tolist()
+
+    return Y
+
+
 def load_model(task, checkpoint, lm, use_gpu, fp16=True):
     """Load a model for a specific task.
 
@@ -315,7 +326,8 @@ if __name__ == "__main__":
                                          num_workers=0,
                                          collate_fn=DittoDataset.pad)
         # get prediction result for validation set
-        Y,Y_logits = classify_from_iterator(models[0],valid_iterator,hp.use_gpu)
+        Y_hat,Y_logits = classify_from_iterator(models[0],valid_iterator,hp.use_gpu)
+        Y = get_label(valid_iterator)
 
         if hp.calibration == "temperature":
             temp_list = np.logspace(-1,1,100)
@@ -404,7 +416,7 @@ if __name__ == "__main__":
         output_conf = output_scores.max(axis=1).tolist()
 
     elif hp.calibration == "conformal":
-        output_pred, output_logits = classify_from_iterator(models[i],test_iterator,hp.use_gpu)
+        output_pred, output_logits = classify_from_iterator(models[0],test_iterator,hp.use_gpu)
         output_scores = np.array(softmax(output_logits, axis=1))
         output_conf = output_scores.max(axis=1).tolist()
         # calibration on confidence

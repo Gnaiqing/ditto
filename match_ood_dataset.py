@@ -5,7 +5,7 @@ import json
 import numpy as np
 import argparse
 
-def get_matcher_command(task,run_id=0,calibration=None,da=True,dk=True,su=True,input=None,output=None,gpu_id=0):
+def get_matcher_command(task,run_id=0,calibration=None,da=True,dk=True,su=True,input=None,output=None,gpu_id=1):
 
     params = {
         "Dirty/DBLP-ACM": ("swap","roberta"),
