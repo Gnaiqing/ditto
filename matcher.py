@@ -423,7 +423,7 @@ if __name__ == "__main__":
         for i in range(len(output_conf)):
             # calculate the quantile of output_conf[i]
             conf = output_conf[i]
-            calibrated_conf = sum(E < conf) / len(E)
+            calibrated_conf = sum(E < conf) / (len(E) + 1)
             # use the quantile to replace the original confidence
             if calibrated_conf < 0.5:
                 output_conf[i] = 0.5
